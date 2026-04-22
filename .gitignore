@@ -1,0 +1,23 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Runtime / build artifacts
+dist/
+build/
+coverage/
+
+# Local env or secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python cache (if used by tooling)
+__pycache__/
+*.pyc
