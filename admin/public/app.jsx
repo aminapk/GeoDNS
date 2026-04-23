@@ -1,4 +1,4 @@
-const { useEffect, useMemo, useState } = React;
+const { useEffect, useMemo, useRef, useState } = React;
 
 const EXPRESSION_VARIABLES = [
   { id: "country", label: "Country Code", path: "geoip/country/code", defaultValue: "US" },
@@ -211,6 +211,7 @@ function App() {
   const [settings, setSettings] = useState({ nameservers: ["ns1.example.com.", "ns2.example.com."] });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const cloudflareFileRef = useRef(null);
 
   async function refreshSettings() {
     const r = await fetch("/api/settings");
@@ -462,6 +463,45 @@ function App() {
       await refreshDraft();
       setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
       setMessage(`Synced ${data.domains} domain(s) from CoreDNS files`);
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openCloudflareImport() {
+    if (cloudflareFileRef.current) {
+      cloudflareFileRef.current.click();
+    }
+  }
+
+  async function importFromCloudflareFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    setBusy(true);
+    setMessage("");
+    try {
+      const content = await file.text();
+      const r = await fetch("/api/import-cloudflare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, filename: file.name })
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        throw new Error(data.error || "Cloudflare import failed");
+      }
+      await refreshDraft();
+      setMessage(
+        `Imported ${data.added_records || 0} record(s) from ${data.domains || 0} domain(s). Created ${
+          data.created_domains || 0
+        } new domain(s).`
+      );
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -784,7 +824,17 @@ function App() {
       </div>
 
       <div className="card toolbar">
+        <input
+          ref={cloudflareFileRef}
+          type="file"
+          accept=".txt,.zone,.conf,.dns,text/plain"
+          style={{ display: "none" }}
+          onChange={importFromCloudflareFile}
+        />
         <button onClick={addDomain}>Add Domain</button>
+        <button className="secondary" onClick={openCloudflareImport} disabled={busy}>
+          Import from Cloudflare
+        </button>
         <button onClick={applyChanges} disabled={busy || hasInvalidData}>
           Apply Changes
         </button>

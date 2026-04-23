@@ -40,6 +40,13 @@ const db = createDatabase();
 const PORT = Number(process.env.GEODNS_ADMIN_PORT || 3000);
 const SESSION_SECRET =
   process.env.GEODNS_ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString("hex");
+const COOKIE_SECURE_ENV = String(process.env.GEODNS_ADMIN_COOKIE_SECURE || "auto").toLowerCase();
+const COOKIE_SECURE =
+  COOKIE_SECURE_ENV === "false" || COOKIE_SECURE_ENV === "0"
+    ? false
+    : COOKIE_SECURE_ENV === "true" || COOKIE_SECURE_ENV === "1"
+      ? "auto"
+      : "auto";
 const DEFAULT_SETUP_NS1 = process.env.GEODNS_SETUP_DEFAULT_NS1 || "ns1.example.com.";
 const DEFAULT_SETUP_NS2 = process.env.GEODNS_SETUP_DEFAULT_NS2 || "ns2.example.com.";
 
@@ -61,7 +68,7 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.GEODNS_ADMIN_COOKIE_SECURE === "true",
+      secure: COOKIE_SECURE,
       maxAge: 1000 * 60 * 60 * 12
     }
   })
@@ -123,6 +130,217 @@ function validateDomainName(name) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
     String(name || "").trim().toLowerCase()
   );
+}
+
+function normalizeRecordHost(rawHost, domainName) {
+  const host = String(rawHost || "@").trim().replace(/\.$/, "").toLowerCase();
+  if (!host || host === "@") {
+    return "@";
+  }
+  if (host === domainName) {
+    return "@";
+  }
+  const suffix = `.${domainName}`;
+  if (host.endsWith(suffix)) {
+    const label = host.slice(0, -suffix.length);
+    return label || "@";
+  }
+  return host;
+}
+
+function stripInlineDnsComment(value) {
+  const text = String(value || "");
+  let inQuote = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '"' && text[i - 1] !== "\\") {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (ch === ";" && !inQuote) {
+      return text.slice(0, i).trim();
+    }
+  }
+  return text.trim();
+}
+
+function parseCloudflareRecordLine(line, defaultTtl) {
+  const tokens = line.match(/"[^"]*"|\S+/g);
+  if (!tokens || tokens.length < 3) {
+    return null;
+  }
+
+  const name = tokens.shift();
+  const allowedTypes = new Set(["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "PTR", "SOA"]);
+  const allowedClasses = new Set(["IN", "CH", "HS"]);
+
+  let ttl = defaultTtl;
+  let type = null;
+  let index = 0;
+  while (index < tokens.length) {
+    const token = String(tokens[index]).toUpperCase();
+    if (allowedTypes.has(token)) {
+      type = token;
+      index += 1;
+      break;
+    }
+    if (/^\d+$/.test(token)) {
+      ttl = Number(token);
+      index += 1;
+      continue;
+    }
+    if (allowedClasses.has(token)) {
+      index += 1;
+      continue;
+    }
+    return null;
+  }
+
+  if (!type) {
+    return null;
+  }
+
+  const rest = stripInlineDnsComment(tokens.slice(index).join(" "));
+  if (!rest) {
+    return null;
+  }
+
+  const record = {
+    name,
+    type,
+    value: rest,
+    ttl,
+    priority: "",
+    weight: "",
+    port: ""
+  };
+
+  if (type === "MX") {
+    const mx = rest.match(/^(\d+)\s+(.+)$/);
+    if (!mx) {
+      return null;
+    }
+    record.priority = Number(mx[1]);
+    record.value = mx[2].trim();
+  } else if (type === "SRV") {
+    const srv = rest.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/);
+    if (!srv) {
+      return null;
+    }
+    record.priority = Number(srv[1]);
+    record.weight = Number(srv[2]);
+    record.port = Number(srv[3]);
+    record.value = srv[4].trim();
+  } else if (type === "TXT") {
+    record.value = rest.replace(/^"(.*)"$/, "$1");
+  } else if (type === "A" || type === "AAAA") {
+    record.value = rest.split(/\s+/)[0];
+  } else if (type === "CNAME" || type === "NS" || type === "PTR") {
+    record.value = rest.split(/\s+/)[0];
+  }
+
+  return record;
+}
+
+function parseCloudflareExport(content) {
+  const lines = String(content || "").split(/\r?\n/);
+  let defaultTtl = 300;
+  let currentOrigin = null;
+  const domains = new Map();
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      return;
+    }
+
+    const domainCommentMatch = line.match(/domain:\s*([a-z0-9.-]+\.[a-z]{2,})/i);
+    if (domainCommentMatch) {
+      const commentDomain = domainCommentMatch[1].replace(/\.$/, "").toLowerCase();
+      if (validateDomainName(commentDomain)) {
+        currentOrigin = commentDomain;
+      }
+    }
+
+    if (line.startsWith(";") || line.startsWith("#")) {
+      return;
+    }
+    if (line.toUpperCase().startsWith("$TTL")) {
+      const ttlValue = Number(line.split(/\s+/)[1]);
+      if (ttlValue > 0) {
+        defaultTtl = ttlValue;
+      }
+      return;
+    }
+    if (line.toUpperCase().startsWith("$ORIGIN")) {
+      const origin = line.split(/\s+/)[1] || "";
+      const normalized = origin.replace(/\.$/, "").toLowerCase();
+      if (validateDomainName(normalized)) {
+        currentOrigin = normalized;
+      }
+      return;
+    }
+
+    const record = parseCloudflareRecordLine(line, defaultTtl);
+    if (!record) {
+      return;
+    }
+
+    if (!currentOrigin) {
+      const inferred = String(record.name || "").replace(/\.$/, "").toLowerCase();
+      if (validateDomainName(inferred)) {
+        currentOrigin = inferred;
+      }
+    }
+    if (!currentOrigin) {
+      return;
+    }
+
+    if (record.type === "SOA") {
+      return;
+    }
+
+    const domainName = currentOrigin;
+    const normalizedRecord = {
+      ...record,
+      name: normalizeRecordHost(record.name, domainName)
+    };
+
+    if (!domains.has(domainName)) {
+      domains.set(domainName, []);
+    }
+    domains.get(domainName).push(normalizedRecord);
+  });
+
+  return Array.from(domains.entries()).map(([domain, records]) => ({
+    domain,
+    records
+  }));
+}
+
+function recordKey(record) {
+  return [
+    String(record.name || "@").trim().toLowerCase(),
+    String(record.type || "").trim().toUpperCase(),
+    String(record.value || "").trim(),
+    String(record.ttl || ""),
+    String(record.priority || ""),
+    String(record.weight || ""),
+    String(record.port || "")
+  ].join("|");
+}
+
+function mergeRecords(existing, incoming) {
+  const list = Array.isArray(existing) ? [...existing] : [];
+  const seen = new Set(list.map(recordKey));
+  (incoming || []).forEach((record) => {
+    const key = recordKey(record);
+    if (!seen.has(key)) {
+      list.push({ ...record });
+      seen.add(key);
+    }
+  });
+  return list;
 }
 
 function validateDraft(domains) {
@@ -313,6 +531,106 @@ app.post("/api/sync-from-coredns", requireAuth, (_req, res) => {
     return res.json({ ok: true, domains: discovered.domains.length, warnings: discovered.warnings });
   } catch (err) {
     return res.status(500).json({ error: `Failed to sync from CoreDNS: ${err.message}` });
+  }
+});
+
+app.post("/api/import-cloudflare", requireAuth, (req, res) => {
+  try {
+    const content = String(req.body?.content || "");
+    if (!content.trim()) {
+      return res.status(400).json({ error: "Cloudflare export content is required." });
+    }
+
+    const parsedDomains = parseCloudflareExport(content);
+    if (!parsedDomains.length) {
+      return res.status(400).json({
+        error: "No valid DNS records found. Please upload a Cloudflare BIND export with $ORIGIN."
+      });
+    }
+
+    const draft = getDraft(db);
+    const discovered = loadDraftFromCoreDNS();
+    const corednsDomainSet = new Set(discovered.domains.map((item) => item.name));
+    const discoveredByName = new Map(discovered.domains.map((item) => [item.name, item]));
+    const draftByName = new Map(draft.map((item) => [item.name, item]));
+    const nextDraft = draft.map((domain) => ({
+      ...domain,
+      views: (domain.views || []).map((view) => ({
+        ...view,
+        records: [...(view.records || [])]
+      }))
+    }));
+
+    let mergedIntoExistingViews = 0;
+    let createdDomains = 0;
+    let addedRecords = 0;
+
+    parsedDomains.forEach(({ domain, records }) => {
+      const inCoreDNS = corednsDomainSet.has(domain);
+      let targetDomain = nextDraft.find((item) => item.name === domain);
+
+      if (inCoreDNS && !targetDomain && discoveredByName.has(domain)) {
+        const discoveredDomain = discoveredByName.get(domain);
+        targetDomain = {
+          ...discoveredDomain,
+          views: (discoveredDomain.views || []).map((view) => ({
+            ...view,
+            records: [...(view.records || [])]
+          }))
+        };
+        nextDraft.push(targetDomain);
+      }
+
+      if (!targetDomain && !inCoreDNS) {
+        targetDomain = {
+          name: domain,
+          default_ttl: Number(records[0]?.ttl || 300) || 300,
+          views: [
+            {
+              name: "default",
+              is_default: true,
+              match_expression: null,
+              records: []
+            },
+            {
+              name: "us",
+              is_default: false,
+              match_expression: "metadata('geoip/country/code') == 'US'",
+              records: []
+            }
+          ]
+        };
+        nextDraft.push(targetDomain);
+        createdDomains += 1;
+      }
+
+      if (!targetDomain) {
+        targetDomain = draftByName.get(domain) || nextDraft.find((item) => item.name === domain);
+      }
+      if (!targetDomain) {
+        return;
+      }
+
+      (targetDomain.views || []).forEach((view) => {
+        const before = (view.records || []).length;
+        view.records = mergeRecords(view.records, records);
+        addedRecords += Math.max(0, view.records.length - before);
+      });
+      if (inCoreDNS) {
+        mergedIntoExistingViews += (targetDomain.views || []).length;
+      }
+    });
+
+    replaceDraft(db, nextDraft);
+    return res.json({
+      ok: true,
+      domains: parsedDomains.length,
+      created_domains: createdDomains,
+      merged_views: mergedIntoExistingViews,
+      added_records: addedRecords
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to import from Cloudflare: ${err.message}` });
   }
 });
 

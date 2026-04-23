@@ -141,7 +141,7 @@ fi
 ADMIN_SESSION_SECRET="$(openssl rand -hex 32)"
 
 if [[ -n "$ADMIN_WEB_DOMAIN" ]]; then
-  COOKIE_SECURE="true"
+  COOKIE_SECURE="auto"
 else
   COOKIE_SECURE="false"
 fi

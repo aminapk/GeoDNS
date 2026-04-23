@@ -84,6 +84,7 @@ On first launch, complete setup:
 - **Apply Changes:** validates draft and applies to CoreDNS
 - **Rollback Last Apply:** restores latest backup snapshot
 - **Sync from CoreDNS:** imports domain/view definitions from active Corefile/zone files
+- **Import from Cloudflare:** upload a Cloudflare/BIND zone export; existing domains merge records into all existing views, and new domains are created with `default` and `us` views
 
 ---
 
