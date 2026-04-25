@@ -634,6 +634,26 @@ app.post("/api/import-cloudflare", requireAuth, (req, res) => {
   }
 });
 
+app.post("/api/change-password", requireAuth, (req, res) => {
+  const { current_password, new_password } = req.body || {};
+  if (!current_password || !new_password) {
+    return res.status(400).json({ error: "current_password and new_password are required." });
+  }
+  if (String(new_password).length < 8) {
+    return res.status(400).json({ error: "New password must be at least 8 characters." });
+  }
+  const user = getAdminUser();
+  if (!user) {
+    return res.status(400).json({ error: "No admin user found." });
+  }
+  if (!bcrypt.compareSync(String(current_password), user.password_hash)) {
+    return res.status(401).json({ error: "Current password is incorrect." });
+  }
+  const newHash = bcrypt.hashSync(String(new_password), 12);
+  db.prepare("UPDATE admin_user SET password_hash = ? WHERE id = 1").run(newHash);
+  return res.json({ ok: true });
+});
+
 app.get("/api/settings", requireAuth, (_req, res) => {
   try {
     return res.json(getSettings(db));

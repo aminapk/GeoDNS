@@ -211,6 +211,7 @@ function App() {
   const [settings, setSettings] = useState({ nameservers: ["ns1.example.com.", "ns2.example.com."] });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [changePassword, setChangePassword] = useState({ current: "", next: "", confirm: "", error: "", success: "" });
   const cloudflareFileRef = useRef(null);
 
   async function refreshSettings() {
@@ -373,6 +374,33 @@ function App() {
       setSelectedDomainIndex(-1);
       setWarnings([]);
       setMessage("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleChangePassword(e) {
+    e.preventDefault();
+    setChangePassword((prev) => ({ ...prev, error: "", success: "" }));
+    if (changePassword.next !== changePassword.confirm) {
+      setChangePassword((prev) => ({ ...prev, error: "New passwords do not match." }));
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch("/api/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: changePassword.current, new_password: changePassword.next })
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setChangePassword((prev) => ({ ...prev, error: data.error || "Failed to change password." }));
+      } else {
+        setChangePassword({ current: "", next: "", confirm: "", error: "", success: "Password changed successfully." });
+      }
+    } catch (err) {
+      setChangePassword((prev) => ({ ...prev, error: err.message }));
     } finally {
       setBusy(false);
     }
@@ -879,6 +907,46 @@ function App() {
             Save Nameservers
           </button>
         </div>
+      </div>
+
+      <div className="card">
+        <h3>Change Password</h3>
+        <form onSubmit={handleChangePassword}>
+          <div className="row">
+            <label className="wide">
+              Current Password
+              <input
+                type="password"
+                value={changePassword.current}
+                onChange={(e) => setChangePassword((prev) => ({ ...prev, current: e.target.value }))}
+                autoComplete="current-password"
+              />
+            </label>
+            <label className="wide">
+              New Password
+              <input
+                type="password"
+                value={changePassword.next}
+                onChange={(e) => setChangePassword((prev) => ({ ...prev, next: e.target.value }))}
+                autoComplete="new-password"
+              />
+            </label>
+            <label className="wide">
+              Confirm New Password
+              <input
+                type="password"
+                value={changePassword.confirm}
+                onChange={(e) => setChangePassword((prev) => ({ ...prev, confirm: e.target.value }))}
+                autoComplete="new-password"
+              />
+            </label>
+            <button className="secondary" type="submit" disabled={busy}>
+              Change Password
+            </button>
+          </div>
+          {changePassword.error ? <p className="error">{changePassword.error}</p> : null}
+          {changePassword.success ? <p className="status">{changePassword.success}</p> : null}
+        </form>
       </div>
 
       <div className="card">
